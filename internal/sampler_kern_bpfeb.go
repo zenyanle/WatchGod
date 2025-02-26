@@ -12,9 +12,14 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type sampler_kernCounters struct {
-	Packets uint64
-	Bytes   uint64
+type sampler_kernPacketBuffer struct{ Data [256]uint8 }
+
+type sampler_kernPacketMetadata struct {
+	PacketSize   uint32
+	CapturedSize uint32
+	Protocol     uint32
+	Flags        uint32
+	Timestamp    uint64
 }
 
 // loadSampler_kern returns the embedded CollectionSpec for sampler_kern.
@@ -59,17 +64,16 @@ type sampler_kernSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type sampler_kernProgramSpecs struct {
-	SamplerFn *ebpf.ProgramSpec `ebpf:"sampler_fn"`
+	Sampler *ebpf.ProgramSpec `ebpf:"sampler"`
 }
 
 // sampler_kernMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type sampler_kernMapSpecs struct {
-	ActionCounters *ebpf.MapSpec `ebpf:"action_counters"`
-	PacketCount    *ebpf.MapSpec `ebpf:"packet_count"`
-	SampleRate     *ebpf.MapSpec `ebpf:"sample_rate"`
-	Samples        *ebpf.MapSpec `ebpf:"samples"`
+	Events        *ebpf.MapSpec `ebpf:"events"`
+	MetadataMap   *ebpf.MapSpec `ebpf:"metadata_map"`
+	PacketDataMap *ebpf.MapSpec `ebpf:"packet_data_map"`
 }
 
 // sampler_kernVariableSpecs contains global variables before they are loaded into the kernel.
@@ -98,18 +102,16 @@ func (o *sampler_kernObjects) Close() error {
 //
 // It can be passed to loadSampler_kernObjects or ebpf.CollectionSpec.LoadAndAssign.
 type sampler_kernMaps struct {
-	ActionCounters *ebpf.Map `ebpf:"action_counters"`
-	PacketCount    *ebpf.Map `ebpf:"packet_count"`
-	SampleRate     *ebpf.Map `ebpf:"sample_rate"`
-	Samples        *ebpf.Map `ebpf:"samples"`
+	Events        *ebpf.Map `ebpf:"events"`
+	MetadataMap   *ebpf.Map `ebpf:"metadata_map"`
+	PacketDataMap *ebpf.Map `ebpf:"packet_data_map"`
 }
 
 func (m *sampler_kernMaps) Close() error {
 	return _Sampler_kernClose(
-		m.ActionCounters,
-		m.PacketCount,
-		m.SampleRate,
-		m.Samples,
+		m.Events,
+		m.MetadataMap,
+		m.PacketDataMap,
 	)
 }
 
@@ -123,12 +125,12 @@ type sampler_kernVariables struct {
 //
 // It can be passed to loadSampler_kernObjects or ebpf.CollectionSpec.LoadAndAssign.
 type sampler_kernPrograms struct {
-	SamplerFn *ebpf.Program `ebpf:"sampler_fn"`
+	Sampler *ebpf.Program `ebpf:"sampler"`
 }
 
 func (p *sampler_kernPrograms) Close() error {
 	return _Sampler_kernClose(
-		p.SamplerFn,
+		p.Sampler,
 	)
 }
 
