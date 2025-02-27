@@ -12,7 +12,7 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type sampler_kernPacketBuffer struct{ Data [256]uint8 }
+type sampler_kernPacketBuffer struct{ Data [512]uint8 }
 
 type sampler_kernPacketMetadata struct {
 	PacketSize   uint32
