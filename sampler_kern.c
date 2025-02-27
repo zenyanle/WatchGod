@@ -7,15 +7,17 @@
 
 #define MAX_PACKET_SIZE 256
 #define MAX_CPUS 16
+#define ETH_HDR_SIZE 14      // 以太网头部固定大小
+#define CAPTURE_SIZE 26      // 我们想捕获的固定字节数
 
-// 定义元数据结构 - 确保与Go代码匹配
+// 定义元数据结构
 struct packet_metadata {
     __u32 packet_size;
     __u32 captured_size;
     __u32 protocol;
     __u32 flags;
     __u64 timestamp;
-} __attribute__((packed)); // 确保紧凑布局，没有填充
+} __attribute__((packed));
 
 // 定义数据缓冲区结构
 struct packet_buffer {
@@ -44,15 +46,6 @@ struct {
     __uint(max_entries, MAX_CPUS);
 } events SEC(".maps");
 
-// 辅助函数：发送数据到perf buffer
-static __always_inline int
-send_to_perf(struct xdp_md *ctx, void *map, void *data, __u32 size)
-{
-    __u64 flags = BPF_F_CURRENT_CPU;
-    flags |= (__u64)size << 32;
-    return bpf_perf_event_output(ctx, map, flags, data, size);
-}
-
 SEC("xdp")
 int sampler(struct xdp_md *ctx)
 {
@@ -60,69 +53,62 @@ int sampler(struct xdp_md *ctx)
     void *data = (void *)(long)ctx->data;
     
     // 基本边界检查
-    if (data >= data_end)
+    if (data + ETH_HDR_SIZE > data_end)
         return XDP_PASS;
 
-    // 计算数据包大小
+    // 计算数据包大小 - 使用无符号类型
     __u64 packet_size = data_end - data;
-    __u32 safe_packet_size = packet_size > 0xffffffff ? 0xffffffff : (__u32)packet_size;
-    __u32 sample_size = safe_packet_size;
-    if (sample_size > MAX_PACKET_SIZE)
-        sample_size = MAX_PACKET_SIZE;
-
-    // 确保至少能访问以太网头部
-    if (data + 14 > data_end)
-        return XDP_PASS;
-
+    __u32 safe_packet_size = packet_size;
+    
     // 获取元数据缓冲区
     __u32 zero = 0;
     struct packet_metadata *meta = bpf_map_lookup_elem(&metadata_map, &zero);
     if (!meta)
         return XDP_PASS;
 
-    // 获取协议类型
-    struct ethhdr *eth = data;
-    __u16 eth_proto = bpf_ntohs(eth->h_proto);
-
-    // 填充元数据
-    meta->packet_size = safe_packet_size;
-    meta->captured_size = sample_size;
-    meta->timestamp = bpf_ktime_get_ns();
-    meta->protocol = eth_proto;
-    meta->flags = 0;
-
     // 获取数据包缓冲区
     struct packet_buffer *buffer = bpf_map_lookup_elem(&packet_data_map, &zero);
     if (!buffer)
         return XDP_PASS;
 
-    // 复制以太网头部 (一定能访问到，前面已经检查)
-    buffer->data[0] = eth->h_dest[0];
-    buffer->data[1] = eth->h_dest[1];
-    buffer->data[2] = eth->h_dest[2];
-    buffer->data[3] = eth->h_dest[3];
-    buffer->data[4] = eth->h_dest[4];
-    buffer->data[5] = eth->h_dest[5];
+    // 复制以太网头部 - 直接通过结构体访问
+    struct ethhdr *eth = data;
+    __u16 eth_proto = bpf_ntohs(eth->h_proto);
     
-    buffer->data[6] = eth->h_source[0];
-    buffer->data[7] = eth->h_source[1];
-    buffer->data[8] = eth->h_source[2];
-    buffer->data[9] = eth->h_source[3];
-    buffer->data[10] = eth->h_source[4];
-    buffer->data[11] = eth->h_source[5];
+    // 填充元数据 - 使用常量大小
+    meta->packet_size = safe_packet_size;
+    meta->captured_size = ETH_HDR_SIZE;  // 先设为最小值
+    meta->protocol = eth_proto;
+    meta->timestamp = bpf_ktime_get_ns();
+    meta->flags = 0;
     
-    buffer->data[12] = (eth_proto >> 8) & 0xFF;
+    // 复制以太网头部 - 直接复制MAC地址
+    __builtin_memcpy(buffer->data, eth->h_dest, 6);
+    __builtin_memcpy(buffer->data + 6, eth->h_source, 6);
+    buffer->data[12] = eth_proto >> 8;
     buffer->data[13] = eth_proto & 0xFF;
-
-    // 发送元数据 - 使用明确的大小，确保Go端匹配正确
-    int ret = send_to_perf(ctx, &events, meta, sizeof(struct packet_metadata));
+    
+    // 尝试复制额外的12字节 - 如果有足够数据
+    if (data + CAPTURE_SIZE <= data_end) {
+        // 有足够数据复制26字节 (14+12)
+        __builtin_memcpy(buffer->data + 14, data + 14, 12);
+        meta->captured_size = CAPTURE_SIZE;  // 26字节
+    }
+    
+    // 发送元数据 - 使用固定大小
+    __u32 meta_size = sizeof(struct packet_metadata);
+    int ret = bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU | ((__u64)meta_size << 32),
+                                   meta, meta_size);
     if (ret < 0)
         return XDP_PASS;
 
-    // 发送数据包内容
-    ret = send_to_perf(ctx, &events, buffer->data, 14);  // 只发送以太网头
-    if (ret < 0)
-        return XDP_PASS;
+    // 发送数据包内容 - 使用固定大小，避免可变大小
+    __u32 data_size = meta->captured_size;
+    if (data_size > CAPTURE_SIZE)  // 添加明确的上限
+        data_size = CAPTURE_SIZE;
+
+    ret = bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU | ((__u64)data_size << 32), 
+                               buffer->data, data_size);
 
     return XDP_PASS;
 }
